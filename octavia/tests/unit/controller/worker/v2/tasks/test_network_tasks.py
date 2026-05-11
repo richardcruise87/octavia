@@ -210,6 +210,117 @@ class TestNetworkTasks(base.TestCase):
 
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     @mock.patch('octavia.db.api.get_session', return_value=_session_mock)
+    def test_calculate_amphora_delta_vip_on_mgmt_net(
+            self, mock_get_session, mock_lb_repo_get, mock_get_net_driver):
+        # Regression test for bug #2150752: when VIP network == management
+        # network, the management NIC is excluded from network_to_nic_map so
+        # that network appears in add_ids unless explicitly subtracted. Before
+        # the fix this either raised KeyError on net_vnic_type_map or created
+        # duplicate NICs on the management network on every recalculation.
+        LB_ID = uuidutils.generate_uuid()
+        MEMBER_NETWORK_ID = uuidutils.generate_uuid()
+        MEMBER_SUBNET_ID = uuidutils.generate_uuid()
+
+        mock_driver = mock.MagicMock()
+        mock_get_net_driver.return_value = mock_driver
+
+        # VIP network IS the management network
+        VIP_NETWORK_ID = self.mgmt_net_id
+        VIP_SUBNET_ID = self.mgmt_subnet_id
+
+        member_mock = mock.MagicMock()
+        member_mock.subnet_id = MEMBER_SUBNET_ID
+        member_mock.provisioning_status = 'ACTIVE'
+        pool_mock = mock.MagicMock()
+        pool_mock.members = [member_mock]
+        lb_mock = mock.MagicMock()
+        lb_mock.pools = [pool_mock]
+
+        lb_dict = {
+            constants.LOADBALANCER_ID: LB_ID,
+            constants.VIP_SUBNET_ID: VIP_SUBNET_ID,
+            constants.VIP_NETWORK_ID: VIP_NETWORK_ID,
+        }
+        amphora_dict = {
+            constants.ID: AMPHORA_ID,
+            constants.COMPUTE_ID: COMPUTE_ID,
+        }
+
+        mgmt_interface = data_models.Interface(
+            network_id=VIP_NETWORK_ID,
+            fixed_ips=[data_models.FixedIP(subnet_id=VIP_SUBNET_ID)])
+
+        member_subnet = data_models.Subnet(
+            id=MEMBER_SUBNET_ID,
+            network_id=MEMBER_NETWORK_ID)
+
+        mock_lb_repo_get.return_value = lb_mock
+        mock_driver.get_subnet.return_value = member_subnet
+        mock_driver.get_plugged_networks.return_value = [mgmt_interface]
+
+        calc_amp_delta = network_tasks.CalculateAmphoraDelta()
+        result = calc_amp_delta.execute(lb_dict, amphora_dict, {})
+
+        # Only the member network should be added; the management/VIP network
+        # must NOT appear in add_nics (already connected as the mgmt NIC).
+        self.assertEqual(1, len(result[constants.ADD_NICS]))
+        self.assertEqual(
+            MEMBER_NETWORK_ID,
+            result[constants.ADD_NICS][0][constants.NETWORK_ID])
+        # Nothing to delete (management NIC is excluded from tracking)
+        self.assertEqual(0, len(result[constants.DELETE_NICS]))
+
+    @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
+    @mock.patch('octavia.db.api.get_session', return_value=_session_mock)
+    def test_calculate_amphora_delta_vip_not_plugged(
+            self, mock_get_session, mock_lb_repo_get, mock_get_net_driver):
+        # Regression test for bug #2150752: KeyError when the VIP network is
+        # in add_ids but has no entry in net_vnic_type_map (no SR-IOV members).
+        LB_ID = uuidutils.generate_uuid()
+        VRRP_PORT_ID = uuidutils.generate_uuid()
+        VIP_NETWORK_ID = uuidutils.generate_uuid()
+        VIP_SUBNET_ID = uuidutils.generate_uuid()
+        mock_driver = mock.MagicMock()
+        mock_get_net_driver.return_value = mock_driver
+        lb_mock = mock.MagicMock()
+        lb_mock.pools = []
+        lb_dict = {
+            constants.LOADBALANCER_ID: LB_ID,
+            constants.VIP_SUBNET_ID: VIP_SUBNET_ID,
+            constants.VIP_NETWORK_ID: VIP_NETWORK_ID
+        }
+        amphora_dict = {constants.ID: AMPHORA_ID,
+                        constants.COMPUTE_ID: COMPUTE_ID,
+                        constants.VRRP_PORT_ID: VRRP_PORT_ID}
+
+        mgmt_subnet = data_models.Subnet(
+            id=self.mgmt_subnet_id,
+            network_id=self.mgmt_net_id)
+        mgmt_interface = data_models.Interface(
+            network_id=self.mgmt_net_id,
+            fixed_ips=[
+                data_models.FixedIP(
+                    subnet_id=mgmt_subnet.id)])
+
+        mock_lb_repo_get.return_value = lb_mock
+        # VIP network is not yet plugged; only the management interface exists
+        mock_driver.get_plugged_networks.return_value = [mgmt_interface]
+
+        calc_amp_delta = network_tasks.CalculateAmphoraDelta()
+        # Must not raise KeyError (bug #2150752)
+        result = calc_amp_delta.execute(lb_dict, amphora_dict, {})
+
+        self.assertEqual(AMPHORA_ID, result[constants.AMPHORA_ID])
+        self.assertEqual(COMPUTE_ID, result[constants.COMPUTE_ID])
+        self.assertEqual(1, len(result[constants.ADD_NICS]))
+        add_nic = result[constants.ADD_NICS][0]
+        self.assertEqual(VIP_NETWORK_ID, add_nic[constants.NETWORK_ID])
+        self.assertEqual(constants.VNIC_TYPE_NORMAL,
+                         add_nic[constants.VNIC_TYPE])
+        self.assertEqual(0, len(result[constants.DELETE_NICS]))
+
+    @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
+    @mock.patch('octavia.db.api.get_session', return_value=_session_mock)
     def test_calculate_delta(self, mock_get_session, mock_get_lb,
                              mock_get_net_driver):
         mock_driver = mock.MagicMock()

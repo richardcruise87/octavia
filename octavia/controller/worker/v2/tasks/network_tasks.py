@@ -117,7 +117,13 @@ class CalculateAmphoraDelta(BaseNetworkTask):
             port_id=network_to_nic_map[net_id].port_id)
             for net_id in del_ids]
 
-        add_ids = desired_network_ids - plugged_network_ids
+        # Exclude management networks: their NICs already exist on the amphora
+        # and are intentionally absent from network_to_nic_map /
+        # plugged_network_ids. Without this subtraction, a VIP on the
+        # management network lands in add_ids every recalculation, creating
+        # duplicate NICs (eth2, eth3…).
+        add_ids = (desired_network_ids - plugged_network_ids -
+                   set(management_nets))
         add_nics = [n_data_models.Interface(
             network_id=add_net_id,
             fixed_ips=[
@@ -125,7 +131,8 @@ class CalculateAmphoraDelta(BaseNetworkTask):
                     subnet_id=subnet_id)
                 for subnet_id, net_id in desired_subnet_to_net_map.items()
                 if net_id == add_net_id],
-            vnic_type=net_vnic_type_map[add_net_id])
+            vnic_type=net_vnic_type_map.get(add_net_id,
+                                            constants.VNIC_TYPE_NORMAL))
             for add_net_id in add_ids]
 
         # Calculate member Subnet deltas
