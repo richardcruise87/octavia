@@ -73,6 +73,12 @@ Use cases:
   deployment accepts traffic using a quantum-vulnerable certificate, receiving
   an API error (not just a log warning) if one is submitted.
 
+* A deployer discovers that an algorithm previously considered PQC-safe has
+  been found to have a weakness.  They need to remove it from their allowlist
+  immediately, without waiting for an Octavia release.  They update their
+  config and restart; the startup log records the deviation from the Octavia
+  default so auditors can see why the list was changed.
+
 
 Proposed change
 ===============
@@ -121,8 +127,10 @@ is set based on the key type returned by the library.
 
 **Part 2 — PQC compliance checker utility**
 
-A new module ``octavia/common/tls_utils/pqc_utils.py`` exposes a single
-public function::
+A new module ``octavia/common/tls_utils/pqc_utils.py`` exposes two public
+functions.
+
+The first is the per-certificate checker::
 
     check_algorithm_compliance(public_key_or_cert, plane) -> (algorithm_name, is_compliant)
 
@@ -135,7 +143,7 @@ it consistently.  The function:
   APIs (``isinstance`` checks against library key classes, OID comparison
   for PQC key types);
 * returns the detected algorithm name and whether it appears in the
-  operator-configured ``pqc_allowed_algorithms`` list.
+  effective ``pqc_allowed_algorithms`` list.
 
 The function contains no custom OID tables or cryptographic logic — all
 algorithm knowledge comes from pyca/cryptography.
@@ -145,7 +153,11 @@ which is not available on ML-DSA and ML-KEM key objects.  This call is replaced
 with an algorithm-agnostic comparison using ``.public_bytes()`` serialisation,
 which works across all key types.
 
-**Part 3 — Per-plane PQC check modes**
+The second function handles startup validation (described in Part 3).
+
+**Part 3 — Per-plane PQC check modes and startup validation**
+
+*Check mode options*
 
 Two new config options are added to the ``[certificates]`` group, one for each
 plane:
@@ -189,18 +201,95 @@ certificates, client-auth CA certificates, and pool backend TLS certificates.
    Client-auth CA cert,octavia/api/v2/controllers/base.py,CA cert load,data
    Pool backend TLS cert,octavia/common/tls_utils/cert_parser.py,cert parse,data
 
-**Interaction between ``key_algorithm`` and ``pqc_control_plane_check_mode``**:
-If ``key_algorithm`` names an algorithm that is not in ``pqc_allowed_algorithms``
-and ``pqc_control_plane_check_mode = STRICT``, Octavia would generate a
-non-compliant amphora certificate and then immediately reject it, breaking
-amphora provisioning.  To surface this misconfiguration early, Octavia performs
-a startup check: if ``pqc_control_plane_check_mode = STRICT``, ``key_algorithm``
-is validated against ``pqc_allowed_algorithms`` at boot, and
-``ConfigInvalidError`` is raised if it is not compliant.
+*Algorithm allowlist*
+
+A new constant ``PQC_SAFE_ALGORITHMS`` in ``octavia/common/constants.py`` is
+the Octavia-maintained reference set of PQC-compliant algorithms, corresponding
+to NIST FIPS 203 (ML-KEM), FIPS 204 (ML-DSA), and FIPS 205 (SLH-DSA)::
+
+    PQC_SAFE_ALGORITHMS = [
+        'ML-DSA-44', 'ML-DSA-65', 'ML-DSA-87',
+        'ML-KEM-512', 'ML-KEM-768', 'ML-KEM-1024',
+        'SLH-DSA-SHAKE-128s', 'SLH-DSA-SHAKE-128f', 'SLH-DSA-SHAKE-256s',
+    ]
+
+This constant is the single source of truth for what Octavia considers
+PQC-safe.  It does not change between releases unless the community
+deliberately updates it via a spec or a targeted bugfix to respond to a
+newly-discovered algorithm weakness.
+
+The config option ``pqc_allowed_algorithms`` (ListOpt) defaults to
+``constants.PQC_SAFE_ALGORITHMS`` and, when set, **replaces** the default
+list in its entirety (oslo.config ``ListOpt`` semantics — no merging).  This
+means an operator who sets ``pqc_allowed_algorithms = ML-DSA-65`` gets an
+effective allowlist of ``['ML-DSA-65']`` only; any other algorithms that were
+in the default are no longer permitted.  Operators must list every algorithm
+they intend to allow.  This explicit replacement behaviour is intentional:
+it gives operators full control and makes the effective allowlist unambiguous.
+
+*Startup validation — ``validate_pqc_config()``*
+
+The second function in ``pqc_utils.py``::
+
+    validate_pqc_config()
+
+is called once at service startup, after oslo.config is fully loaded, from
+each Octavia service entrypoint (``octavia.cmd.api``,
+``octavia.cmd.worker``, ``octavia.cmd.health_manager``,
+``octavia.cmd.housekeeping``).  It performs two checks:
+
+1. **Algorithm list audit**: if any plane is non-DISABLED, compare
+   ``CONF.certificates.pqc_allowed_algorithms`` against
+   ``constants.PQC_SAFE_ALGORITHMS``.  If the lists differ, emit a single
+   ``LOG.warning`` of the form::
+
+       PQC allowed algorithm list differs from Octavia defaults.
+         Added (not in Octavia defaults): ['CUSTOM-ALG']
+         Removed (from Octavia defaults): ['ML-DSA-44']
+         Effective list: ['ML-DSA-65', ..., 'CUSTOM-ALG']
+         See the PQC Migration operator guide for the rationale behind the
+         Octavia default list.
+
+   Both directions of the diff are reported:
+
+   * *Added*: algorithms in the configured list that are not in
+     ``PQC_SAFE_ALGORITHMS``.  These may be non-standard or experimental
+     and should be reviewed by a security auditor.
+   * *Removed*: algorithms in ``PQC_SAFE_ALGORITHMS`` that are not in the
+     configured list.  These are intentional exclusions — for example,
+     removing an algorithm found to have a weakness.
+
+   If the lists are identical (whether because the option was not set, or
+   because the operator set it to the same values), no warning is emitted.
+
+2. **Control-plane consistency check**: if
+   ``pqc_control_plane_check_mode = STRICT``, verify that ``key_algorithm``
+   is present in the effective ``pqc_allowed_algorithms`` list.  If it is
+   not, raise ``ConfigInvalidError`` at startup (rather than breaking amphora
+   provisioning mid-operation).
+
+Because ``validate_pqc_config()`` is called from the service entrypoint, the
+algorithm list warning is emitted exactly once per process start.  If the
+service is reloaded via SIGHUP (config reload), the function is called again
+so that the warning reflects the newly loaded configuration — this is correct
+and expected behaviour for a config-reload event.
 
 
 Alternatives
 ------------
+
+**Sentinel-value approach for ``pqc_allowed_algorithms``**: set the config
+default to ``None`` and resolve the effective list in code::
+
+    effective = CONF.certificates.pqc_allowed_algorithms or constants.PQC_SAFE_ALGORITHMS
+
+This would distinguish "not set" (use constants silently) from "explicitly set
+to same list" (compare and potentially warn).  Rejected because the distinction
+adds no value: an operator who explicitly copies the constants list into their
+config should see no warning (the lists are identical and the comparison is
+cheap); and ``oslo-config-generator`` would emit ``None`` as the default rather
+than the actual algorithm list, degrading generated config file quality.
+Using the constants directly as the config default is cleaner.
 
 **3-value enum on a single global option** (i.e. one ``pqc_check_mode`` option
 covering all certificate load points): simpler surface area, but cannot model
@@ -242,12 +331,6 @@ a dedicated ``[tls]`` group.  Rejected in favour of ``[certificates]`` because
 all existing algorithm-related options (``signing_digest``,
 ``ca_private_key``, etc.) already live there, and the new options are
 conceptually part of the same subsystem.
-
-**Enumerate the algorithm allowlist as a hard-coded set**: Hard-coding the set
-of PQC algorithms in Octavia would require a release to add new NIST-approved
-algorithms.  A configurable ``ListOpt`` gives operators the flexibility to
-adjust the allowlist as standards evolve and to accept algorithms that are
-approved in their specific regulatory context.
 
 
 Data model impact
@@ -296,11 +379,17 @@ Security impact
   quantum-vulnerable certificates and a path to enforce quantum-safe algorithm
   usage independently on the control plane and data plane.
 
+* The startup warning mechanism gives security auditors a persistent, once-per-
+  start signal whenever the effective algorithm allowlist deviates from the
+  Octavia-maintained default.  This makes compliance reviews straightforward
+  without requiring operators to diff config files manually.
+
 * No new privilege escalation.  The ``pqc_allowed_algorithms`` list is
   operator-controlled configuration, not user input.
 
-* The default values (``DISABLED`` for both planes, ``key_algorithm = RSA-2048``)
-  preserve current behaviour entirely, so no existing deployment is broken.
+* The default values (``DISABLED`` for both planes, ``key_algorithm = RSA-2048``,
+  ``pqc_allowed_algorithms = constants.PQC_SAFE_ALGORITHMS``) preserve current
+  behaviour entirely, so no existing deployment is broken.
 
 
 Notifications impact
@@ -328,7 +417,8 @@ pyca/cryptography object) is O(1) and adds negligible latency.  It runs at
 configuration time — when a listener or pool is created or updated — not in the
 data path.  There is no impact on request throughput or health-check frequency.
 When both check modes are ``DISABLED`` (the default), there is no overhead at
-all.
+all.  The startup validation (``validate_pqc_config()``) runs once per process
+start and is similarly negligible.
 
 
 Other deployer impact
@@ -342,10 +432,33 @@ Other deployer impact
    key_algorithm,StrOpt,RSA-2048,"Algorithm for amphora private key generation (amphora mTLS only — see note in Proposed change)"
    pqc_control_plane_check_mode,StrOpt,DISABLED,"DISABLED / PERMISSIVE / STRICT for amphora mTLS certificates"
    pqc_data_plane_check_mode,StrOpt,DISABLED,"DISABLED / PERMISSIVE / STRICT for listener TLS / CA / pool backend certificates"
-   pqc_allowed_algorithms,ListOpt,"ML-DSA-44, ML-DSA-65, ML-DSA-87, ML-KEM-512, ML-KEM-768, ML-KEM-1024, SLH-DSA-SHAKE-128s, SLH-DSA-SHAKE-128f, SLH-DSA-SHAKE-256s",Algorithm names considered PQC-compliant (shared across both planes)
+   pqc_allowed_algorithms,ListOpt,constants.PQC_SAFE_ALGORITHMS,"Full replacement allowlist of PQC-compliant algorithm names; see constants.py for the default set"
 
-The default ``pqc_allowed_algorithms`` list corresponds to the NIST FIPS
-203 (ML-KEM), FIPS 204 (ML-DSA), and FIPS 205 (SLH-DSA) standards.
+**Important**: ``pqc_allowed_algorithms`` replaces the default list in its
+entirety when set.  It does not extend or merge with ``PQC_SAFE_ALGORITHMS``.
+Operators must explicitly list every algorithm they intend to permit.
+
+**Responding to a newly-discovered algorithm weakness** (without an Octavia
+upgrade): if a NIST-standardised algorithm is found to have an exploitable
+weakness, an operator can immediately remove it from their allowlist by editing
+``pqc_allowed_algorithms`` in the config and restarting the service.  No
+Octavia code change or release is required.  The startup warning will record
+the deviation from ``PQC_SAFE_ALGORITHMS``, providing an audit trail of why
+the list was changed.  This is the primary mechanism for responding to
+algorithm deprecations between Octavia releases.
+
+**Startup warning format**: when ``pqc_allowed_algorithms`` differs from
+``constants.PQC_SAFE_ALGORITHMS`` and any plane is non-DISABLED, the following
+WARNING is emitted once at service start::
+
+    PQC allowed algorithm list differs from Octavia defaults.
+      Added (not in Octavia defaults): ['CUSTOM-ALG']
+      Removed (from Octavia defaults): ['ML-DSA-44']
+      Effective list: ['ML-DSA-65', 'ML-DSA-87', ..., 'CUSTOM-ALG']
+      See the PQC Migration operator guide for the rationale behind the
+      Octavia default list.
+
+When the lists are identical, no warning is emitted.
 
 **Recommended migration procedure for operators:**
 
@@ -408,6 +521,10 @@ plane)`` and pass the appropriate plane identifier (``'control'`` or
 not need to inspect check-mode config options directly.  This requirement
 will be documented in the developer guide.
 
+Developers adding new certificate-generation paths should ensure those paths
+honour ``key_algorithm`` and call ``check_algorithm_compliance()`` with
+``plane='control'``.
+
 
 Implementation
 ==============
@@ -424,27 +541,29 @@ Other contributors:
 Work Items
 ----------
 
-1. Add ``key_algorithm``, ``pqc_control_plane_check_mode``,
-   ``pqc_data_plane_check_mode``, and ``pqc_allowed_algorithms`` config options
-   to ``octavia/certificates/common/local.py`` and register them in
-   ``octavia/common/config.py``.
+1. Add ``PQC_SAFE_ALGORITHMS`` constant to ``octavia/common/constants.py``.
 
-2. Refactor ``_generate_private_key()`` in
+2. Add ``key_algorithm``, ``pqc_control_plane_check_mode``,
+   ``pqc_data_plane_check_mode``, and ``pqc_allowed_algorithms`` config options
+   to ``octavia/certificates/common/local.py``; register them in
+   ``octavia/common/config.py``.  The ``pqc_allowed_algorithms`` default is
+   ``constants.PQC_SAFE_ALGORITHMS``.
+
+3. Refactor ``_generate_private_key()`` in
    ``octavia/certificates/generator/local.py`` to read ``key_algorithm`` from
    config and dispatch to the appropriate pyca/cryptography primitive.  Remove
    the hardcoded ``rsa.generate_private_key()`` call.  Add startup validation
    that raises ``ConfigInvalidError`` for unsupported algorithm names.
 
-3. Add startup validation: if ``pqc_control_plane_check_mode = STRICT``,
-   verify that ``key_algorithm`` is in ``pqc_allowed_algorithms``, raising
-   ``ConfigInvalidError`` if not.
-
 4. Fix ``_generate_csr()`` in the same file to set ``KeyUsage`` extensions
    based on the key type (RSA vs EC vs PQC) rather than unconditionally setting
    ``key_encipherment = True``.
 
-5. Implement ``octavia/common/tls_utils/pqc_utils.py`` containing
-   ``check_algorithm_compliance(cert_or_key, plane)``.
+5. Implement ``octavia/common/tls_utils/pqc_utils.py`` containing:
+
+   * ``check_algorithm_compliance(cert_or_key, plane)``
+   * ``validate_pqc_config()`` — algorithm list audit and control-plane
+     consistency check
 
 6. Replace the ``.public_numbers()`` comparison in
    ``octavia/common/tls_utils/cert_parser.py`` with an algorithm-agnostic
@@ -454,45 +573,53 @@ Work Items
    (``barbican.py``, ``cert_parser.py``, ``base.py``,
    ``generator/local.py``), passing the appropriate plane identifier.
 
-8. Unit tests:
+8. Call ``validate_pqc_config()`` from each service entrypoint after
+   oslo.config initialisation: ``octavia.cmd.api``,
+   ``octavia.cmd.worker``, ``octavia.cmd.health_manager``,
+   ``octavia.cmd.housekeeping``.
 
-   * ``test_pqc_utils.py`` — compliance check with RSA, ECDSA, and mocked PQC
-     key objects; all three mode values (DISABLED, PERMISSIVE, STRICT) for each
-     plane; verify no log entry when DISABLED, WARNING when PERMISSIVE, and
-     exception when STRICT.
+9. Unit tests:
+
+   * ``test_pqc_utils.py`` — ``check_algorithm_compliance``: all three mode
+     values (DISABLED, PERMISSIVE, STRICT) for each plane; correct algorithm
+     name extraction for RSA, ECDSA, and mocked PQC key types.
+     ``validate_pqc_config``: no warning when lists match; warning with correct
+     additions/removals when lists differ; ``ConfigInvalidError`` when control
+     plane is STRICT and ``key_algorithm`` is not in the effective allowlist;
+     no warning when both planes are DISABLED.
 
    * ``test_local.py`` / ``test_local_csr.py`` — dispatch on ``key_algorithm``
      (RSA, ECDSA); startup failure for an unsupported algorithm string;
-     startup failure when control plane is STRICT and ``key_algorithm`` is
-     non-compliant; correct ``KeyUsage`` per key type.
+     correct ``KeyUsage`` per key type.
 
    * ``test_cert_parser.py`` — generic key comparison with RSA and EC keys.
 
-9. Functional/Tempest tests:
+10. Functional/Tempest tests:
 
-   * Create a TERMINATED_HTTPS listener with an RSA certificate and
-     ``pqc_data_plane_check_mode = DISABLED`` — listener creates successfully,
-     no WARNING logged.
+    * Create a TERMINATED_HTTPS listener with an RSA certificate and
+      ``pqc_data_plane_check_mode = DISABLED`` — listener creates successfully,
+      no WARNING logged.
 
-   * Create a TERMINATED_HTTPS listener with an RSA certificate and
-     ``pqc_data_plane_check_mode = PERMISSIVE`` — listener creates
-     successfully, WARNING is emitted.
+    * Create a TERMINATED_HTTPS listener with an RSA certificate and
+      ``pqc_data_plane_check_mode = PERMISSIVE`` — listener creates
+      successfully, WARNING is emitted.
 
-   * Create a TERMINATED_HTTPS listener with an RSA certificate and
-     ``pqc_data_plane_check_mode = STRICT`` — API returns HTTP 400 with a
-     fault message that identifies the algorithm.
+    * Create a TERMINATED_HTTPS listener with an RSA certificate and
+      ``pqc_data_plane_check_mode = STRICT`` — API returns HTTP 400 with a
+      fault message that identifies the algorithm.
 
-   * Full ML-DSA path (listener with PQC cert, STRICT mode passes) is deferred
-     until pyca/cryptography ships stable ML-DSA APIs.
+    * Full ML-DSA path (listener with PQC cert, STRICT mode passes) is deferred
+      until pyca/cryptography ships stable ML-DSA APIs.
 
-10. Operator documentation: new section "Post-Quantum Cryptography Migration"
+11. Operator documentation: new section "Post-Quantum Cryptography Migration"
     covering config options, per-plane migration procedure, and WARNING log
     format.
 
-11. Configuration reference: document new options in the ``[certificates]``
-    group, including the scope note for ``key_algorithm``.
+12. Configuration reference: document new options in the ``[certificates]``
+    group, including the scope note for ``key_algorithm`` and the
+    override-not-extend semantics of ``pqc_allowed_algorithms``.
 
-12. Release note.
+13. Release note.
 
 
 Dependencies
@@ -500,9 +627,9 @@ Dependencies
 
 * **pyca/cryptography**: ML-DSA (FIPS 204) and ML-KEM (FIPS 203) are not yet
   exposed as stable public APIs in any released version of pyca/cryptography
-  (v46 at time of writing).  Work items 1–9 can be fully implemented and tested
-  today using RSA and ECDSA.  The ``ML-DSA-*`` and ``ML-KEM-*`` values in
-  ``key_algorithm`` and ``pqc_allowed_algorithms`` become functional when the
+  (v46 at time of writing).  Work items 1–10 can be fully implemented and
+  tested today using RSA and ECDSA.  The ``ML-DSA-*`` and ``ML-KEM-*`` values
+  in ``key_algorithm`` and ``pqc_allowed_algorithms`` become functional when the
   library ships them.  No minimum version requirement is introduced until that
   point.  Progress is tracked upstream in the pyca/cryptography issue tracker.
 
@@ -523,11 +650,13 @@ Dependencies
 Testing
 =======
 
-Unit test coverage is sufficient for the compliance-check utility and the
-key-generation dispatch logic because both are pure functions operating on
-in-memory pyca/cryptography objects with no external dependencies.  All three
-mode values (DISABLED, PERMISSIVE, STRICT) must be exercised for both planes
-in unit tests.
+Unit test coverage is sufficient for the compliance-check utility, the
+algorithm list audit, and the key-generation dispatch logic because all are
+pure functions operating on in-memory objects with no external dependencies.
+All three mode values (DISABLED, PERMISSIVE, STRICT) must be exercised for
+both planes.  ``validate_pqc_config()`` must be tested with identical lists
+(no warning), lists with additions only, lists with removals only, and lists
+with both additions and removals.
 
 Tempest tests are needed for the three data-plane check-mode scenarios
 (DISABLED, PERMISSIVE, STRICT) because they exercise the integration between
@@ -546,20 +675,24 @@ Documentation Impact
 ====================
 
 * **Operator guide**: New section "Post-Quantum Cryptography Migration"
-  documenting the per-plane migration procedure, new configuration options, and
-  the format of WARNING log messages emitted for non-compliant certificates.
+  documenting the per-plane migration procedure, new configuration options, the
+  format of WARNING log messages emitted for non-compliant certificates, and the
+  format of the startup warning emitted when ``pqc_allowed_algorithms`` differs
+  from the Octavia defaults.
 
 * **Configuration reference**: New entries for ``key_algorithm``,
   ``pqc_control_plane_check_mode``, ``pqc_data_plane_check_mode``, and
   ``pqc_allowed_algorithms`` in the ``[certificates]`` group.  The reference
   entry for ``key_algorithm`` must note explicitly that it currently governs
   only internally generated amphora certificates, not operator-provided or
-  Barbican-stored keys.
+  Barbican-stored keys.  The reference entry for ``pqc_allowed_algorithms``
+  must note the override-not-extend semantics and the startup warning behaviour.
 
 * **Developer guide**: New requirement to call
   ``check_algorithm_compliance(cert_or_key, plane)`` in any new
   certificate-load path, with guidance on the correct plane identifier and
-  how to handle the PERMISSIVE and STRICT outcomes.
+  how to handle the PERMISSIVE and STRICT outcomes.  New requirement to call
+  ``validate_pqc_config()`` from any new service entrypoint.
 
 
 References
