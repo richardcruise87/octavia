@@ -17,6 +17,7 @@ import uuid
 
 from cryptography import exceptions as crypto_exceptions
 from cryptography.hazmat import backends
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
@@ -28,6 +29,7 @@ from oslo_utils import timeutils
 from octavia.certificates.common import local as local_common
 from octavia.certificates.generator import cert_gen
 from octavia.common import exceptions
+from octavia.common.tls_utils import pqc_utils
 
 LOG = logging.getLogger(__name__)
 
@@ -181,11 +183,23 @@ class LocalCertGenerator(cert_gen.CertGenerator):
 
     @classmethod
     def _generate_private_key(cls, bit_length=2048, passphrase=None):
-        pk = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=bit_length,
-            backend=backends.default_backend()
-        )
+        algorithm = CONF.certificates.key_algorithm
+        _backend = backends.default_backend()
+        if algorithm == 'RSA-2048':
+            pk = rsa.generate_private_key(
+                public_exponent=65537, key_size=2048, backend=_backend)
+        elif algorithm == 'RSA-4096':
+            pk = rsa.generate_private_key(
+                public_exponent=65537, key_size=4096, backend=_backend)
+        elif algorithm == 'ECDSA-P256':
+            pk = ec.generate_private_key(ec.SECP256R1(), _backend)
+        elif algorithm == 'ECDSA-P384':
+            pk = ec.generate_private_key(ec.SECP384R1(), _backend)
+        else:
+            raise exceptions.ConfigInvalidError(
+                msg=('Unsupported key_algorithm: %r. Supported values: '
+                     'RSA-2048, RSA-4096, ECDSA-P256, ECDSA-P384'
+                     % algorithm))
         if passphrase:
             encryption = serialization.BestAvailableEncryption(passphrase)
         else:
@@ -201,6 +215,42 @@ class LocalCertGenerator(cert_gen.CertGenerator):
         pk = serialization.load_pem_private_key(
             data=private_key, password=passphrase,
             backend=backends.default_backend())
+        if isinstance(pk, rsa.RSAPrivateKey):
+            key_usage = x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                content_commitment=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            )
+        elif isinstance(pk, ec.EllipticCurvePrivateKey):
+            key_usage = x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=True,
+                content_commitment=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            )
+        else:
+            key_usage = x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                content_commitment=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            )
         csr = x509.CertificateSigningRequestBuilder().subject_name(
             x509.Name([
                 x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, cn),
@@ -213,20 +263,7 @@ class LocalCertGenerator(cert_gen.CertGenerator):
             ),
             critical=True
         )
-        csr = csr.add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=True,
-                data_encipherment=True,
-                key_agreement=True,
-                content_commitment=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False
-            ),
-            critical=True
-        )
+        csr = csr.add_extension(key_usage, critical=True)
         csr = csr.add_extension(
             x509.SubjectAlternativeName([x509.DNSName(cn)]),
             critical=False
@@ -243,6 +280,9 @@ class LocalCertGenerator(cert_gen.CertGenerator):
         pk = cls._generate_private_key(bit_length, passphrase)
         csr = cls._generate_csr(cn, pk, passphrase)
         cert = cls.sign_cert(csr, validity, **kwargs)
+        signed_x509 = x509.load_pem_x509_certificate(
+            cert, backends.default_backend())
+        pqc_utils.check_algorithm_compliance(signed_x509, 'control')
         cert_object = local_common.LocalCert(
             certificate=cert,
             private_key=pk,

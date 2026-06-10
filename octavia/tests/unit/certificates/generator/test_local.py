@@ -12,21 +12,29 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 import datetime
+from unittest import mock
 
 from cryptography import exceptions as crypto_exceptions
 from cryptography.hazmat import backends
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 from cryptography import x509
+from oslo_config import cfg
+from oslo_config import fixture as oslo_fixture
 from oslo_utils import timeutils
 
 import octavia.certificates.generator.local as local_cert_gen
+from octavia.common import exceptions
 from octavia.tests.unit.certificates.generator import local_csr
 
 
 class TestLocalGenerator(local_csr.BaseLocalCSRTestCase):
     def setUp(self):
         super().setUp()
+        self.conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        self.conf.config(group='certificates', key_algorithm='RSA-2048')
         self.signing_digest = "sha256"
 
         # Setup CA data
@@ -185,18 +193,19 @@ class TestLocalGenerator(local_csr.BaseLocalCSRTestCase):
         cn = 'testCN'
         bit_length = 1024
 
-        # Attempt to generate a cert/key pair
-        cert_object = self.cert_generator.generate_cert_key_pair(
-            cn=cn,
-            validity=2 * 365 * 24 * 60 * 60,
-            bit_length=bit_length,
-            passphrase=self.ca_private_key_passphrase,
-            ca_cert=self.ca_certificate,
-            ca_key=self.ca_private_key,
-            ca_key_pass=self.ca_private_key_passphrase
-        )
+        with mock.patch(
+                'octavia.common.tls_utils.pqc_utils'
+                '.check_algorithm_compliance'):
+            cert_object = self.cert_generator.generate_cert_key_pair(
+                cn=cn,
+                validity=2 * 365 * 24 * 60 * 60,
+                bit_length=bit_length,
+                passphrase=self.ca_private_key_passphrase,
+                ca_cert=self.ca_certificate,
+                ca_key=self.ca_private_key,
+                ca_key_pass=self.ca_private_key_passphrase
+            )
 
-        # Validate that the cert and key are loadable
         cert = x509.load_pem_x509_certificate(
             data=cert_object.certificate, backend=backends.default_backend())
         self.assertIsNotNone(cert)
@@ -206,3 +215,61 @@ class TestLocalGenerator(local_csr.BaseLocalCSRTestCase):
             password=cert_object.private_key_passphrase,
             backend=backends.default_backend())
         self.assertIsNotNone(key)
+
+    def test_generate_private_key_rsa_2048(self):
+        self.conf.config(group='certificates', key_algorithm='RSA-2048')
+        pk_pem = self.cert_generator._generate_private_key()
+        pk = serialization.load_pem_private_key(
+            pk_pem, password=None, backend=backends.default_backend())
+        self.assertIsInstance(pk, rsa.RSAPrivateKey)
+        self.assertEqual(2048, pk.key_size)
+
+    def test_generate_private_key_rsa_4096(self):
+        self.conf.config(group='certificates', key_algorithm='RSA-4096')
+        pk_pem = self.cert_generator._generate_private_key()
+        pk = serialization.load_pem_private_key(
+            pk_pem, password=None, backend=backends.default_backend())
+        self.assertIsInstance(pk, rsa.RSAPrivateKey)
+        self.assertEqual(4096, pk.key_size)
+
+    def test_generate_private_key_ecdsa_p256(self):
+        self.conf.config(group='certificates', key_algorithm='ECDSA-P256')
+        pk_pem = self.cert_generator._generate_private_key()
+        pk = serialization.load_pem_private_key(
+            pk_pem, password=None, backend=backends.default_backend())
+        self.assertIsInstance(pk, ec.EllipticCurvePrivateKey)
+        self.assertIsInstance(pk.curve, ec.SECP256R1)
+
+    def test_generate_private_key_ecdsa_p384(self):
+        self.conf.config(group='certificates', key_algorithm='ECDSA-P384')
+        pk_pem = self.cert_generator._generate_private_key()
+        pk = serialization.load_pem_private_key(
+            pk_pem, password=None, backend=backends.default_backend())
+        self.assertIsInstance(pk, ec.EllipticCurvePrivateKey)
+        self.assertIsInstance(pk.curve, ec.SECP384R1)
+
+    def test_generate_private_key_unsupported_raises(self):
+        self.conf.config(group='certificates', key_algorithm='NOT-REAL')
+        self.assertRaises(
+            exceptions.ConfigInvalidError,
+            self.cert_generator._generate_private_key)
+
+    def test_generate_csr_rsa_key_usage(self):
+        self.conf.config(group='certificates', key_algorithm='RSA-2048')
+        pk_pem = self.cert_generator._generate_private_key()
+        csr_pem = self.cert_generator._generate_csr('testcn', pk_pem)
+        csr = x509.load_pem_x509_csr(csr_pem, backends.default_backend())
+        ku = csr.extensions.get_extension_for_class(x509.KeyUsage).value
+        self.assertTrue(ku.digital_signature)
+        self.assertTrue(ku.key_encipherment)
+        self.assertFalse(ku.key_agreement)
+
+    def test_generate_csr_ecdsa_key_usage(self):
+        self.conf.config(group='certificates', key_algorithm='ECDSA-P256')
+        pk_pem = self.cert_generator._generate_private_key()
+        csr_pem = self.cert_generator._generate_csr('testcn', pk_pem)
+        csr = x509.load_pem_x509_csr(csr_pem, backends.default_backend())
+        ku = csr.extensions.get_extension_for_class(x509.KeyUsage).value
+        self.assertTrue(ku.digital_signature)
+        self.assertFalse(ku.key_encipherment)
+        self.assertTrue(ku.key_agreement)

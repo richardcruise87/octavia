@@ -24,6 +24,7 @@ from wsme import types as wtypes
 from octavia.common import constants
 from octavia.common import exceptions
 from octavia.common import policy
+from octavia.common.tls_utils import pqc_utils
 from octavia.db import models
 from octavia.db import repositories
 from octavia.i18n import _
@@ -288,6 +289,9 @@ class BaseController(pecan_rest.RestController):
             except AttributeError:
                 pass
             ca_cert = x509.load_pem_x509_certificate(ca_pem, default_backend())
+            pqc_utils.check_algorithm_compliance(ca_cert, 'data')
+        except exceptions.CertificateValidationException:
+            raise
         except Exception as e:
             raise exceptions.ValidationException(detail=_(
                 "The client authentication CA certificate is invalid. "

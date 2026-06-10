@@ -18,12 +18,16 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 from cryptography import x509
+from oslo_config import cfg
+from oslo_config import fixture as oslo_fixture
 
 import octavia.tests.unit.base as base
 
 
 class BaseLocalCSRTestCase(base.TestCase):
     def setUp(self):
+        self.conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        self.conf.config(group='certificates', key_algorithm='RSA-2048')
         self.signing_digest = "sha256"
 
         # Set up CSR data
@@ -74,40 +78,34 @@ class BaseLocalCSRTestCase(base.TestCase):
             x509.oid.NameOID.COMMON_NAME)[0].value)
 
     def test_generate_private_key(self):
-        bit_length = 1024
-        # Attempt to generate a private key
-        pk = self.cert_generator._generate_private_key(
-            bit_length=bit_length
-        )
+        pk = self.cert_generator._generate_private_key()
 
-        # Attempt to load the generated private key
         pko = serialization.load_pem_private_key(
             data=pk, password=None, backend=backends.default_backend())
 
-        # Make sure the bit_length is what we set
-        self.assertEqual(pko.key_size, bit_length)
+        self.assertEqual(pko.key_size, 2048)
 
     def test_generate_private_key_with_passphrase(self):
-        bit_length = 2048
-        # Attempt to generate a private key
         pk = self.cert_generator._generate_private_key(
-            bit_length=bit_length,
             passphrase=self.ca_private_key_passphrase
         )
 
-        # Attempt to load the generated private key
         pko = serialization.load_pem_private_key(
             data=pk, password=self.ca_private_key_passphrase,
             backend=backends.default_backend())
 
-        # Make sure the bit_length is what we set
-        self.assertEqual(pko.key_size, bit_length)
+        self.assertEqual(pko.key_size, 2048)
 
     def test_generate_cert_key_pair_mock(self):
         cn = 'testCN'
 
-        with mock.patch.object(self.cert_generator, 'sign_cert') as m:
-            # Attempt to generate a cert/key pair
+        with (mock.patch.object(self.cert_generator, 'sign_cert') as m,
+              mock.patch(
+                  'octavia.common.tls_utils.pqc_utils'
+                  '.check_algorithm_compliance'),
+              mock.patch(
+                  'octavia.certificates.generator.local.x509'
+                  '.load_pem_x509_certificate')):
             self.cert_generator.generate_cert_key_pair(
                 cn=cn,
                 validity=2 * 365 * 24 * 60 * 60,

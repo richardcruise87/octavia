@@ -15,6 +15,11 @@
 import datetime
 from unittest import mock
 
+from cryptography.hazmat import backends
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
 from cryptography import x509
 
 from octavia.common import data_models
@@ -146,22 +151,25 @@ class TestTLSParseUtils(base.TestCase):
         client = mock.MagicMock()
         context = mock.Mock()
         context.project_id = '12345'
-        with mock.patch.object(cert_parser,
-                               'get_host_names') as cp:
-            with mock.patch.object(cert_parser,
-                                   '_map_cert_tls_container'):
-                cp.return_value = {'cn': 'fakeCN'}
-                cert_parser.load_certificates_data(client, listener, context)
+        pqc_patch = mock.patch(
+            'octavia.common.tls_utils.pqc_utils.check_algorithm_compliance')
+        x509_patch = mock.patch(
+            'octavia.common.tls_utils.cert_parser.x509'
+            '.load_pem_x509_certificate')
+        with (mock.patch.object(cert_parser, 'get_host_names') as cp,
+              mock.patch.object(cert_parser, '_map_cert_tls_container'),
+              pqc_patch,
+              x509_patch):
+            cp.return_value = {'cn': 'fakeCN'}
+            cert_parser.load_certificates_data(client, listener, context)
 
-                # Ensure upload_cert is called three times
-                calls_cert_mngr = [
-                    mock.call.get_cert(context, 'cont_id_1', check_only=True),
-                    mock.call.get_cert(context, 'cont_id_2', check_only=True),
-                    mock.call.get_cert(context, 'cont_id_3', check_only=True)
-                ]
-                client.assert_has_calls(calls_cert_mngr)
+            calls_cert_mngr = [
+                mock.call.get_cert(context, 'cont_id_1', check_only=True),
+                mock.call.get_cert(context, 'cont_id_2', check_only=True),
+                mock.call.get_cert(context, 'cont_id_3', check_only=True)
+            ]
+            client.assert_has_calls(calls_cert_mngr)
 
-        # Test asking for nothing
         listener = sample_configs_combined.sample_listener_tuple(
             tls=False, sni=False, client_ca_cert=False)
         client = mock.MagicMock()
@@ -251,6 +259,76 @@ class TestTLSParseUtils(base.TestCase):
                               tzinfo=datetime.timezone.utc),
             exp_date)
 
-        # test the exception
         self.assertRaises(exceptions.UnreadableCert,
                           cert_parser.get_cert_expiration, 'bad-cert-file')
+
+
+class TestValidateCertPublicBytes(base.TestCase):
+    """Tests for the algorithm-agnostic public key comparison in validate_cert.
+
+    Ensures the .public_bytes() replacement for .public_numbers() works for
+    both RSA and EC key types.
+    """
+
+    def _make_rsa_cert_and_key(self):
+        key = rsa.generate_private_key(
+            65537, 2048, backends.default_backend())
+        subject = x509.Name([
+            x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, 'test'),
+        ])
+        cert_obj = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime(2024, 1, 1))
+            .not_valid_after(datetime.datetime(2030, 1, 1))
+            .sign(key, hashes.SHA256(), backends.default_backend())
+        )
+        cert_pem = cert_obj.public_bytes(serialization.Encoding.PEM)
+        key_pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption())
+        return cert_pem, key_pem, key
+
+    def _make_ec_cert_and_key(self):
+        key = ec.generate_private_key(
+            ec.SECP256R1(), backends.default_backend())
+        subject = x509.Name([
+            x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, 'test'),
+        ])
+        cert_obj = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime(2024, 1, 1))
+            .not_valid_after(datetime.datetime(2030, 1, 1))
+            .sign(key, hashes.SHA256(), backends.default_backend())
+        )
+        cert_pem = cert_obj.public_bytes(serialization.Encoding.PEM)
+        key_pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption())
+        return cert_pem, key_pem, key
+
+    def test_rsa_matching_key_passes(self):
+        cert_pem, key_pem, _ = self._make_rsa_cert_and_key()
+        self.assertTrue(
+            cert_parser.validate_cert(cert_pem, private_key=key_pem))
+
+    def test_rsa_mismatched_key_raises(self):
+        cert_pem, _, _ = self._make_rsa_cert_and_key()
+        _, other_key_pem, _ = self._make_rsa_cert_and_key()
+        self.assertRaises(
+            exceptions.MisMatchedKey,
+            cert_parser.validate_cert, cert_pem, private_key=other_key_pem)
+
+    def test_ec_matching_key_passes(self):
+        cert_pem, key_pem, _ = self._make_ec_cert_and_key()
+        self.assertTrue(
+            cert_parser.validate_cert(cert_pem, private_key=key_pem))

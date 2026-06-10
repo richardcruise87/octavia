@@ -16,6 +16,7 @@ from oslo_config import cfg
 
 from octavia.common import config
 from octavia.common import rpc
+from octavia.common.tls_utils import pqc_utils
 
 
 def prepare_service(argv=None):
@@ -24,3 +25,4 @@ def prepare_service(argv=None):
     config.init(argv[1:])
     config.setup_logging(cfg.CONF)
     rpc.init()
+    pqc_utils.validate_pqc_config()

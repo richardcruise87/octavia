@@ -27,6 +27,7 @@ from pyasn1_modules import rfc2315
 
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common.tls_utils import pqc_utils
 from octavia.common import utils as octavia_utils
 
 X509_BEG = b'-----BEGIN CERTIFICATE-----'
@@ -58,9 +59,11 @@ def validate_cert(certificate, private_key=None,
     if private_key:
         pkey = _read_private_key(private_key,
                                  passphrase=private_key_passphrase)
-        pknum = pkey.public_key().public_numbers()
-        certnum = cert.public_key().public_numbers()
-        if pknum != certnum:
+        _enc = serialization.Encoding.DER
+        _fmt = serialization.PublicFormat.SubjectPublicKeyInfo
+        pk_bytes = pkey.public_key().public_bytes(_enc, _fmt)
+        cert_bytes = cert.public_key().public_bytes(_enc, _fmt)
+        if pk_bytes != cert_bytes:
             raise exceptions.MisMatchedKey
     return True
 
@@ -370,9 +373,14 @@ def load_certificates_data(cert_mngr, obj, context=None):
                 cert_mngr.get_cert(context,
                                    obj.tls_certificate_id,
                                    check_only=True))
+            tls_x509 = x509.load_pem_x509_certificate(
+                tls_cert.certificate, backends.default_backend())
+            pqc_utils.check_algorithm_compliance(tls_x509, 'data')
         except exceptions.MissingCertSubject:
             # This was logged below, so raise as is to provide a clear
             # user error
+            raise
+        except exceptions.CertificateValidationException:
             raise
         except Exception as e:
             LOG.warning('Unable to retrieve certificate: %s due to %s.',
@@ -387,6 +395,11 @@ def load_certificates_data(cert_mngr, obj, context=None):
                     cert_mngr.get_cert(context,
                                        sni_cont.tls_container_id,
                                        check_only=True))
+                sni_x509 = x509.load_pem_x509_certificate(
+                    cert_container.certificate, backends.default_backend())
+                pqc_utils.check_algorithm_compliance(sni_x509, 'data')
+            except exceptions.CertificateValidationException:
+                raise
             except Exception as e:
                 LOG.warning('Unable to retrieve certificate: %s due to %s.',
                             sni_cont.tls_container_id, str(e))

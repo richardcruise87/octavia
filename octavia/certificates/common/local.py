@@ -22,6 +22,7 @@ from oslo_config import cfg
 from oslo_config import types
 
 from octavia.certificates.common import cert
+from octavia.common import constants
 
 TLS_CERT_DEFAULT = os.environ.get(
     'OS_OCTAVIA_TLS_CA_CERT', '/etc/ssl/certs/ssl-cert-snakeoil.pem'
@@ -72,6 +73,30 @@ certgen_opts = [
                default=30 * 24 * 60 * 60,
                help="The validity time for the Amphora Certificates "
                     "(in seconds)."),
+    cfg.StrOpt('key_algorithm',
+               default='RSA-2048',
+               help='Algorithm used for amphora private key generation. '
+                    'Governs only internally generated amphora mTLS '
+                    'certificates. Supported values: RSA-2048, RSA-4096, '
+                    'ECDSA-P256, ECDSA-P384.'),
+    cfg.StrOpt('pqc_control_plane_check_mode',
+               default=constants.PQC_DISABLED,
+               choices=constants.PQC_CHECK_MODES,
+               help='PQC compliance check mode for amphora mTLS '
+                    'certificates (control plane). One of: '
+                    'DISABLED, PERMISSIVE, STRICT.'),
+    cfg.StrOpt('pqc_data_plane_check_mode',
+               default=constants.PQC_DISABLED,
+               choices=constants.PQC_CHECK_MODES,
+               help='PQC compliance check mode for listener TLS, '
+                    'client-auth CA, and pool backend certificates '
+                    '(data plane). One of: DISABLED, PERMISSIVE, STRICT.'),
+    cfg.ListOpt('pqc_allowed_algorithms',
+                default=constants.PQC_SAFE_ALGORITHMS,
+                help='Full replacement allowlist of PQC-compliant algorithm '
+                     'names. Replaces the default list in its entirety when '
+                     'set. Operators must list every algorithm they intend '
+                     'to permit.'),
 ]
 
 certmgr_opts = [

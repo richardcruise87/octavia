@@ -445,3 +445,13 @@ class MemberSRIOVDisabled(APIException):
 class VIPAddressConflict(APIException):
     msg = _('The VIP IP address is already in use: %(msg)s')
     code = 409
+
+
+class ConfigInvalidError(OctaviaException):
+    message = _('Invalid configuration: %(msg)s')
+
+
+class CertificateValidationException(APIException):
+    msg = _('Certificate algorithm %(algorithm)s is not permitted '
+            'by the configured PQC policy for the %(plane)s plane.')
+    code = 400

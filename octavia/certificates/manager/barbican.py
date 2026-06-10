@@ -31,6 +31,7 @@ from octavia.certificates.manager import barbican_legacy
 from octavia.certificates.manager import cert_mgr
 from octavia.common import exceptions
 from octavia.common.tls_utils import cert_parser
+from octavia.common.tls_utils import pqc_utils
 
 LOG = logging.getLogger(__name__)
 
@@ -117,7 +118,10 @@ class BarbicanCertManager(cert_mgr.CertManager):
         LOG.info('Loading certificate secret %s from Barbican.', cert_ref)
         try:
             cert_secret = connection.secrets.get(secret_ref=cert_ref)
-            return pkcs12.PKCS12Cert(cert_secret.payload)
+            cert_obj = pkcs12.PKCS12Cert(cert_secret.payload)
+            pqc_utils.check_algorithm_compliance(
+                cert_obj.certificate.certificate, 'data')
+            return cert_obj
         except exceptions.UnreadablePKCS12:
             raise
         except Exception as e:
