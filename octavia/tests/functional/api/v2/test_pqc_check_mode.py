@@ -1,4 +1,4 @@
-# Copyright 2024 OpenStack Contributors
+# Copyright 2026 Red Hat, LLC
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may

@@ -1,7 +1,0 @@
----
-fixes:
-  - |
-    Fixed a KeyError in ``CalculateAmphoraDelta`` that occurred when the
-    VIP network needed to be plugged but had no SR-IOV member ports
-    (Launchpad bug `#2150752
-    <https://bugs.launchpad.net/octavia/+bug/2150752>`_).
