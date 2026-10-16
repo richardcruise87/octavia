@@ -1082,6 +1082,47 @@ class TestAmphoraDriverTasks(base.TestCase):
         mock_driver.start_vrrp_service.assert_called_once_with(
             _db_amphora_mock, self.timeout_dict)
 
+    def test_amphora_vrrp_stop(self,
+                               mock_driver,
+                               mock_generate_uuid,
+                               mock_log,
+                               mock_get_session,
+                               mock_listener_repo_get,
+                               mock_listener_repo_update,
+                               mock_amphora_repo_get,
+                               mock_amphora_repo_update):
+        mock_amphora_repo_get.return_value = _db_amphora_mock
+        amphora_vrrp_stop_obj = (
+            amphora_driver_tasks.AmphoraVRRPStop())
+
+        # Success case
+        amphora_vrrp_stop_obj.execute(_amphora_mock,
+                                      timeout_dict=self.timeout_dict)
+        mock_driver.stop_vrrp_service_on_amphora.assert_called_once_with(
+            _db_amphora_mock, self.timeout_dict)
+        # Best-effort: no amphora status update on success
+        mock_amphora_repo_update.assert_not_called()
+
+        # Driver exception is swallowed (best-effort)
+        mock_driver.stop_vrrp_service_on_amphora.reset_mock()
+        mock_amphora_repo_update.reset_mock()
+        mock_driver.stop_vrrp_service_on_amphora.side_effect = Exception(
+            'unreachable')
+        amphora_vrrp_stop_obj.execute(_amphora_mock,
+                                      timeout_dict=self.timeout_dict)
+        mock_driver.stop_vrrp_service_on_amphora.assert_called_once_with(
+            _db_amphora_mock, self.timeout_dict)
+        mock_amphora_repo_update.assert_not_called()
+
+        # DB lookup failure is swallowed (best-effort)
+        mock_driver.stop_vrrp_service_on_amphora.reset_mock()
+        mock_driver.stop_vrrp_service_on_amphora.side_effect = None
+        mock_amphora_repo_get.side_effect = Exception('db boom')
+        amphora_vrrp_stop_obj.execute(_amphora_mock,
+                                      timeout_dict=self.timeout_dict)
+        mock_driver.stop_vrrp_service_on_amphora.assert_not_called()
+        mock_amphora_repo_get.side_effect = None
+
     def test_amphora_index_vrrp_start(self,
                                       mock_driver,
                                       mock_generate_uuid,

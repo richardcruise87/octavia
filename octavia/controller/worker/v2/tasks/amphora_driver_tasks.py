@@ -647,6 +647,35 @@ class AmphoraVRRPStart(BaseAmphoraTask):
         LOG.debug("Started VRRP on amphora %s.", amphora[constants.ID])
 
 
+class AmphoraVRRPStop(BaseAmphoraTask):
+    """Task to stop keepalived on an amphora.
+
+    This is a best-effort task used before deleting an amphora. Stopping
+    keepalived gracefully causes it to send a VRRP priority 0 advertisement,
+    allowing the peer amphora to immediately take over the VIP rather than
+    waiting for the VRRP dead timer. All exceptions are caught so that an
+    unreachable amphora (e.g. a failure-triggered failover) does not block
+    the amphora deletion.
+    """
+
+    def execute(self, amphora, timeout_dict=None):
+        amphora_id = amphora[constants.ID]
+        try:
+            # TODO(johnsom) Optimize this to use the dicts and not need the
+            #               DB lookups
+            session = db_apis.get_session()
+            with session.begin():
+                db_amp = self.amphora_repo.get(session, id=amphora_id)
+
+            self.amphora_driver.stop_vrrp_service_on_amphora(
+                db_amp, timeout_dict)
+            LOG.debug("Stopped VRRP on amphora %s.", amphora_id)
+        except Exception as e:
+            LOG.warning('Could not stop VRRP on amphora %s before deletion. '
+                        'Continuing with amphora deletion due to: %s',
+                        amphora_id, str(e))
+
+
 class AmphoraIndexVRRPStart(BaseAmphoraTask):
     """Task to start keepalived on an amphora.
 

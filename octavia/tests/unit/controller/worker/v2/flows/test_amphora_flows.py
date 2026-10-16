@@ -225,6 +225,22 @@ class TestAmphoraFlows(base.TestCase):
         self.assertEqual(0, len(amp_flow.provides))
         self.assertEqual(0, len(amp_flow.requires))
 
+        # Verify the VRRP stop task runs after marking the amphora health
+        # busy and before the compute delete, so keepalived can send a
+        # priority 0 advertisement before the VM is destroyed.
+        task_names = [t.name for t in amp_flow]
+        amphora_id = self.amp4.id
+        health_busy = (constants.MARK_AMPHORA_HEALTH_BUSY + '-' + amphora_id)
+        vrrp_stop = (constants.AMP_VRRP_STOP + '-' + amphora_id)
+        compute_delete = (constants.DELETE_AMPHORA + '-' + amphora_id)
+
+        self.assertIn(vrrp_stop, task_names)
+        self.assertEqual(1, task_names.count(vrrp_stop))
+        self.assertLess(task_names.index(health_busy),
+                        task_names.index(vrrp_stop))
+        self.assertLess(task_names.index(vrrp_stop),
+                        task_names.index(compute_delete))
+
     def test_get_failover_flow_act_stdby(self, mock_get_net_driver):
         failed_amphora = data_models.Amphora(
             id=uuidutils.generate_uuid(), role=constants.ROLE_MASTER,

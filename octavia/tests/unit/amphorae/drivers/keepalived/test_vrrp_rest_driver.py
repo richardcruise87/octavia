@@ -114,7 +114,7 @@ class TestVRRPRestDriver(base.TestCase):
         populate_mock.assert_called_once_with(self.amphora_mock,
                                               timeout_dict=timeout_dict)
         self.clients[API_VERSION].stop_vrrp.assert_called_once_with(
-            self.amphora_mock)
+            self.amphora_mock, timeout_dict=timeout_dict)
 
     def test_start_vrrp_service(self):
 

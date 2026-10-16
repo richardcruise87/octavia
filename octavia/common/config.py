@@ -371,6 +371,16 @@ haproxy_amphora_opts = [
                default=5,
                help=_('Retry timeout between connection attempts in '
                       'seconds for amphora in failover.')),
+    cfg.IntOpt('vrrp_stop_connection_max_retries',
+               default=2,
+               min=1,
+               help=_('Maximum number of attempts to stop VRRP on an '
+                      'amphora before deleting it.')),
+    cfg.IntOpt('vrrp_stop_connection_retry_interval',
+               default=5,
+               min=0,
+               help=_('Number of seconds between attempts to stop VRRP on '
+                      'an amphora before deleting it.')),
     cfg.IntOpt('build_rate_limit',
                default=-1,
                help=_('Number of amphorae that could be built per controller '

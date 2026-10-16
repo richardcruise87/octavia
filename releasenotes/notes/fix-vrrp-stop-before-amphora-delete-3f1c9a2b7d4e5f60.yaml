@@ -1,0 +1,18 @@
+---
+features:
+  - |
+    Added two new configuration options in the ``[haproxy_amphora]`` section,
+    ``vrrp_stop_connection_max_retries`` (default ``2``) and
+    ``vrrp_stop_connection_retry_interval`` (default ``5``), which bound the
+    best-effort attempts to stop keepalived on an amphora before it is
+    deleted.
+fixes:
+  - |
+    Reduced the traffic interruption during a planned failover of an
+    ACTIVE_STANDBY load balancer. The amphora deletion flow now makes a
+    best-effort attempt to stop keepalived on the amphora before deleting its
+    compute instance. Stopping keepalived gracefully causes it to send a VRRP
+    priority 0 advertisement, allowing the peer amphora to take over the VIP
+    immediately instead of waiting for the VRRP dead timer. If the amphora is
+    unreachable, the stop attempt is skipped and the failover falls back to the
+    previous timer-based behavior.

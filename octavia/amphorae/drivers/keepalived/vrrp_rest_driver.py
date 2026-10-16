@@ -84,7 +84,8 @@ class KeepalivedAmphoraDriverMixin(driver_base.VRRPDriverMixin):
 
         self._populate_amphora_api_version(amphora,
                                            timeout_dict=timeout_dict)
-        self.clients[amphora.api_version].stop_vrrp(amphora)
+        self.clients[amphora.api_version].stop_vrrp(
+            amphora, timeout_dict=timeout_dict)
 
     def start_vrrp_service(self, amphora, timeout_dict=None):
         """Start the VRRP services on an amphorae.

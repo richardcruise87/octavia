@@ -152,6 +152,20 @@ class AmphoraFlows:
         delete_amphora_flow.add(database_tasks.MarkAmphoraHealthBusy(
             name=constants.MARK_AMPHORA_HEALTH_BUSY + '-' + amphora_id,
             inject={constants.AMPHORA: amphora}))
+        # Best-effort stop of VRRP before deleting the compute instance. This
+        # causes keepalived to send a VRRP priority 0 advertisement so the
+        # peer amphora can take over the VIP immediately, rather than waiting
+        # for the VRRP dead timer. Failures are ignored by the task so an
+        # unreachable amphora does not block deletion.
+        vrrp_stop_timeout_dict = {
+            constants.CONN_MAX_RETRIES:
+                CONF.haproxy_amphora.vrrp_stop_connection_max_retries,
+            constants.CONN_RETRY_INTERVAL:
+                CONF.haproxy_amphora.vrrp_stop_connection_retry_interval}
+        delete_amphora_flow.add(amphora_driver_tasks.AmphoraVRRPStop(
+            name=constants.AMP_VRRP_STOP + '-' + amphora_id,
+            inject={constants.AMPHORA: amphora,
+                    constants.TIMEOUT_DICT: vrrp_stop_timeout_dict}))
         delete_amphora_flow.add(compute_tasks.ComputeDelete(
             name=constants.DELETE_AMPHORA + '-' + amphora_id,
             inject={constants.AMPHORA: amphora,

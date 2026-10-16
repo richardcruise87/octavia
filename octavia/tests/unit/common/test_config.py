@@ -52,6 +52,33 @@ class TestConfig(base.TestCase):
             ValueError, conf.config, group="certificates",
             server_certs_key_passphrase="insecure-key-do-not-u$e-this-key")
 
+    def test_vrrp_stop_connection_options(self):
+        conf = self.useFixture(oslo_fixture.Config(config.cfg.CONF))
+
+        # Defaults
+        self.assertEqual(
+            2,
+            conf.conf.haproxy_amphora.vrrp_stop_connection_max_retries)
+        self.assertEqual(
+            5,
+            conf.conf.haproxy_amphora.vrrp_stop_connection_retry_interval)
+
+        # Overrides
+        with tempfile.NamedTemporaryFile(mode='w', delete=True) as tmp:
+            tmp.write("[haproxy_amphora]\n"
+                      "vrrp_stop_connection_max_retries=4\n"
+                      "vrrp_stop_connection_retry_interval=1\n")
+            tmp.flush()
+
+            conf.set_config_files([tmp.name])
+
+        self.assertEqual(
+            4,
+            conf.conf.haproxy_amphora.vrrp_stop_connection_max_retries)
+        self.assertEqual(
+            1,
+            conf.conf.haproxy_amphora.vrrp_stop_connection_retry_interval)
+
     def test_active_connection_retry_interval(self):
         conf = self.useFixture(oslo_fixture.Config(config.cfg.CONF))
 
